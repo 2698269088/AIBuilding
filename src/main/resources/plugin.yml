@@ -1,0 +1,17 @@
+name: AIBuilding
+version: '1.0'
+main: top.mcocet.aIBuilding.AIBuilding
+api-version: '1.18'
+authors: [ MCOCET ]
+description: AI自动化建筑工具
+website: https://home.mcocet.top/
+commands:
+  aibuild:
+    description: 使用AI自动建造建筑
+    usage: /aibuild <建筑描述> | /aibuild stop | /aibuild continue | /aibuild clear | /aibuild reload
+    permission: aibuilding.use
+permissions:
+  aibuilding.use:
+    default: op
+  aibuilding.reload:
+    default: op

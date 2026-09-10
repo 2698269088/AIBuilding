@@ -1,0 +1,67 @@
+# ===================== AI 接口配置 =====================
+# 兼容 OpenAI 协议的任意 API 站，例如:
+#   OpenAI 官方: https://api.openai.com/v1
+#   DeepSeek:    https://api.deepseek.com/v1
+#   硅基流动:     https://api.siliconflow.cn/v1
+ai:
+  api-base: "https://api.openai.com/v1"
+  api-key: "在此填入你的API Key"
+  model: "gpt-4o-mini"
+  temperature: 1
+  # 单次回复的生成上限（token）。设为 -1 表示不发送该参数、不做限制（由 API 站决定上限）
+  max-tokens: -1
+  # 单次建筑任务中 AI 与服务器交互的最大轮数（防止无限循环），达到后可用 /aibuild continue 继续
+  max-iterations: 300
+  # 达到最大轮数后等待玩家确认继续的超时时间（秒），0 表示不超时，超时自动停止任务
+  continue-timeout-seconds: 0
+  request-timeout-seconds: 360
+  # 是否启用 AI 上下文记忆（跨会话记住之前的对话与建筑，可用 /aibuild clear 清除）
+  context-memory: true
+  # 每次会话最多载入的历史消息条数
+  context-max-messages: 30
+  # 历史上下文的字数预算（超出后从最早的消息开始裁剪）
+  context-max-chars: 20000
+
+# ===================== 安全限制 =====================
+safety:
+  # 是否允许 AI 通过 run_command 工具执行服务器命令
+  allow-server-command: true
+  # 是否允许 AI 读取插件配置文件夹中的文件（list_files / read_file 工具）
+  allow-file-read: true
+  # 单次读取文件的大小上限（字节）
+  max-file-size: 1048576
+  # 单次读取文件的最大行数
+  max-file-lines: 500
+  # 单次方块修改操作（填充/替换/形状/复制粘贴/平移）允许的最大方块数
+  max-fill-volume: 32768
+  # 单次区域扫描（get_region_summary）允许的最大方块数
+  max-scan-volume: 262144
+  # 单次区域查看（inspect_region）允许的最大方块数
+  max-inspect-volume: 32768
+  # 每个建筑会话保存的可撤销操作数（undo 工具）
+  history-max-entries: 50
+  # 控制台日志缓存条数（供 AI 的 get_console_logs 工具读取）
+  log-buffer-size: 500
+
+# ===================== 显示设置 =====================
+display:
+  # 是否在聊天栏和控制台显示 AI 调用工具的日志消息（隐藏后仍显示 AI 的文字输出）
+  show-tool-calls: true
+
+# ===================== 系统提示词 =====================
+system-prompt: |
+  你是一个 Minecraft 建筑助手，通过调用工具在服务器中自动建造建筑。
+  坐标规则: X 轴向东为正，Y 轴向上为正，Z 轴向南为正，单位为格，所有坐标必须是整数。
+  工作方式:
+  1. 根据玩家给出的建筑描述进行规划，建筑地基从玩家当前位置附近开始向上建造。对话中可能包含之前任务的历史记录，可作为参考延续未完成的建筑。
+  2. 优先使用 fill_blocks 快速搭建墙体、地板、屋顶等大块结构，用 generate_shape 生成穹顶、圆柱塔楼、金字塔、圆顶等几何元素，再用 place_block 进行门窗、楼梯、装饰等精细操作。
+  3. 用 replace_blocks 可以批量把一种方块换成另一种（例如把临时结构换成正式建材）。
+  4. 建造重复性结构时，可先 copy_region 复制再 paste_region 粘贴（支持旋转和镜像），或用 move_blocks 整体平移。
+  5. 适当混合使用多种方块材质（如木材+石料+玻璃）让建筑更美观。
+  6. 建造过程中可用 get_block / compare_block 检查已有方块，用 get_region_summary 统计区域方块核对进度，用 inspect_region 逐层查看一个区域的完整方块布局（ASCII 平面图），用 get_block_nbt 查看复杂方块（箱子、告示牌、旗帜等）的数据。
+  7. 需要设置箱子物品、告示牌文字等时可使用 set_block_nbt 写入 SNBT 格式的 NBT 数据。
+  8. 如果建造出错，使用 undo 撤销上一次操作。
+  9. 每次区域操作的体积不要过大，分多次操作以保证稳定。
+  10. 除非用户明确要求，不要执行破坏性的服务器命令。
+  11. 可通过 list_files 和 read_file 工具读取插件配置文件夹中的文件（如保存的蓝图、模板与配置）。
+  12. 建造完成后，用一段文字总结你建造了什么。
