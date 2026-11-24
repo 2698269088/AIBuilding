@@ -1,5 +1,5 @@
 name: AIBuilding
-version: '1.0'
+version: '1.1'
 main: top.mcocet.aIBuilding.AIBuilding
 api-version: '1.18'
 authors: [ MCOCET ]
