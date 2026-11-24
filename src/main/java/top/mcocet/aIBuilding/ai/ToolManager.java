@@ -20,6 +20,7 @@ import org.bukkit.inventory.ItemStack;
 import top.mcocet.aIBuilding.AIBuilding;
 import top.mcocet.aIBuilding.util.BlockHistory;
 import top.mcocet.aIBuilding.util.NbtUtil;
+import top.mcocet.aIBuilding.util.SchedulerUtil;
 import top.mcocet.aIBuilding.util.StructureUtil;
 
 import java.util.ArrayList;
@@ -30,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -110,6 +112,10 @@ public class ToolManager {
                     return error("未知工具: " + name);
             }
         } catch (Exception e) {
+            if (SchedulerUtil.isFolia() && e instanceof IllegalStateException) {
+                return error("工具执行异常: " + e.getMessage()
+                        + "（Folia 下同一操作必须位于同一区域，请缩小范围、按区域分次操作）");
+            }
             return error("工具执行异常: " + String.valueOf(e.getMessage()));
         }
     }
@@ -1115,7 +1121,10 @@ public class ToolManager {
         World world = resolveWorld(a, player);
         if (loaded) {
             world.setChunkForceLoaded(cx, cz, true);
-            world.getChunkAt(cx, cz);
+            if (!SchedulerUtil.isFolia()) {
+                // Paper / Spigot 立即同步加载；Folia 下强制加载票据会由区域线程异步加载
+                world.getChunkAt(cx, cz);
+            }
             JsonObject result = ok("区块 (" + cx + ", " + cz + ") 已强制加载，不会被服务器自动卸载");
             result.addProperty("world", world.getName());
             result.addProperty("loaded", world.isChunkLoaded(cx, cz));
@@ -1123,7 +1132,8 @@ public class ToolManager {
             return result.toString();
         }
         world.setChunkForceLoaded(cx, cz, false);
-        if (world.isChunkLoaded(cx, cz)) {
+        if (!SchedulerUtil.isFolia() && world.isChunkLoaded(cx, cz)) {
+            // Folia 下卸载必须由所属区域线程处理，取消强制加载后由服务器在空闲时自动卸载
             world.unloadChunk(cx, cz);
         }
         boolean stillLoaded = world.isChunkLoaded(cx, cz);
@@ -1134,6 +1144,63 @@ public class ToolManager {
         result.addProperty("loaded", stillLoaded);
         result.addProperty("force_loaded", world.isChunkForceLoaded(cx, cz));
         return result.toString();
+    }
+
+    /**
+     * 把工具执行投递到正确的线程：Folia 下按目标坐标投递到区域线程，时间天气 / 命令 / 文件 /
+     * 区块强制加载等投递到全局线程，玩家相关工具投递到实体所在区域；Paper / Spigot 上等同主线程执行。
+     *
+     * @param onResult 在对应线程上执行完毕后回调结果 JSON
+     */
+    public void executeRouted(String name, JsonObject args, Player player, Consumer<String> onResult) {
+        Runnable task = () -> onResult.accept(execute(name, args, player));
+        if (!SchedulerUtil.isFolia()) {
+            Bukkit.getScheduler().runTask(plugin, task);
+            return;
+        }
+        switch (name) {
+            case "set_environment":
+            case "set_chunk_loaded":
+            case "run_command":
+            case "get_console_logs":
+            case "list_files":
+            case "read_file":
+                SchedulerUtil.runGlobal(plugin, task);
+                return;
+            case "get_player_position":
+            case "undo":
+                if (player != null) {
+                    SchedulerUtil.runForEntity(plugin, player, task);
+                    return;
+                }
+                SchedulerUtil.runGlobal(plugin, task);
+                return;
+            default:
+                break;
+        }
+        int[] anchor = anchorOf(args);
+        if (anchor == null) {
+            SchedulerUtil.runGlobal(plugin, task);
+            return;
+        }
+        SchedulerUtil.runAt(plugin, resolveWorld(args, player), anchor[0], anchor[1], task);
+    }
+
+    /**
+     * 工具参数中的位置锚点：优先 x/z，其次区域角点 x1/z1；没有坐标返回 null。
+     */
+    private static int[] anchorOf(JsonObject a) {
+        Integer x = getInt(a, "x");
+        Integer z = getInt(a, "z");
+        if (x != null && z != null) {
+            return new int[]{x, z};
+        }
+        Integer x1 = getInt(a, "x1");
+        Integer z1 = getInt(a, "z1");
+        if (x1 != null && z1 != null) {
+            return new int[]{x1, z1};
+        }
+        return null;
     }
 
     // ==================== 辅助方法 ====================

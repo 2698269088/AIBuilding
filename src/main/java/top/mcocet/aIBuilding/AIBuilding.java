@@ -10,6 +10,7 @@ import top.mcocet.aIBuilding.command.AIBuildCommand;
 import top.mcocet.aIBuilding.util.ContextStore;
 import top.mcocet.aIBuilding.util.LogBuffer;
 import top.mcocet.aIBuilding.util.NbtUtil;
+import top.mcocet.aIBuilding.util.SchedulerUtil;
 
 import java.util.Map;
 import java.util.UUID;
@@ -34,6 +35,14 @@ public final class AIBuilding extends JavaPlugin {
 
         if (!NbtUtil.init()) {
             getLogger().warning("NBT-API 初始化失败，get_block_nbt / set_block_nbt 工具将不可用");
+        }
+
+        if (SchedulerUtil.isFolia()) {
+            if (SchedulerUtil.isSupported()) {
+                getLogger().info("检测到 Folia，已启用区域调度模式（方块操作按目标坐标投递到区域线程）");
+            } else {
+                getLogger().warning("检测到 Folia，但调度器初始化失败，工具可能无法正常执行");
+            }
         }
 
         openAIClient = new OpenAIClient(this);

@@ -4,13 +4,12 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
-import org.bukkit.scheduler.BukkitTask;
 import top.mcocet.aIBuilding.AIBuilding;
 import top.mcocet.aIBuilding.util.BlockHistory;
 import top.mcocet.aIBuilding.util.ContextStore;
+import top.mcocet.aIBuilding.util.SchedulerUtil;
 import top.mcocet.aIBuilding.util.StructureUtil;
 
 import java.util.ArrayList;
@@ -19,7 +18,8 @@ import java.util.List;
 
 /**
  * 一次 AI 建筑会话：负责多轮对话循环。
- * 流程: 异步请求 AI -> 若有工具调用则在主线程执行 -> 结果回传 -> 再次请求，直至 AI 给出最终回复。
+ * 流程: 异步请求 AI -> 若有工具调用则投递到对应线程执行（Folia 区域线程 / 全局线程，Paper 主线程）
+ * -> 结果回传 -> 再次请求，直至 AI 给出最终回复。
  */
 public class BuildSession {
 
@@ -30,7 +30,7 @@ public class BuildSession {
     private volatile StructureUtil.CopiedStructure clipboard;
     private volatile boolean cancelled = false;
     private volatile boolean awaitingContinue = false;
-    private BukkitTask continueTimeoutTask;
+    private Runnable cancelContinueTask;
     private int iterations = 0;
     private final int maxIterations;
 
@@ -178,23 +178,8 @@ public class BuildSession {
                         }
                     }
 
-                    // 工具调用必须在主线程执行
-                    Bukkit.getScheduler().runTask(plugin, () -> {
-                        JsonArray toolResults = new JsonArray();
-                        for (JsonElement element : toolCalls) {
-                            toolResults.add(executeToolCall(element.getAsJsonObject()));
-                        }
-                        // 执行完毕后切回异步线程继续对话
-                        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                            if (cancelled) {
-                                return;
-                            }
-                            for (JsonElement toolResult : toolResults) {
-                                messages.add(toolResult.getAsJsonObject());
-                            }
-                            step();
-                        });
-                    });
+                    // 工具调用按目标位置投递到对应线程执行（Folia 区域线程 / 全局线程，Paper 主线程）
+                    executeToolCalls(toolCalls, 0, new JsonArray());
                 })
                 .exceptionally(ex -> {
                     Throwable cause = ex instanceof java.util.concurrent.CompletionException ? ex.getCause() : ex;
@@ -203,35 +188,62 @@ public class BuildSession {
                 });
     }
 
-    private JsonObject executeToolCall(JsonObject toolCall) {
+    /**
+     * 顺序执行 AI 返回的多个工具调用：每个调用按目标位置投递到对应线程，完成后继续下一个，
+     * 全部结束后回到异步线程继续对话。
+     */
+    private void executeToolCalls(JsonArray toolCalls, int index, JsonArray results) {
+        if (cancelled) {
+            return;
+        }
+        if (index >= toolCalls.size()) {
+            SchedulerUtil.runAsync(plugin, () -> {
+                if (cancelled) {
+                    return;
+                }
+                for (JsonElement toolResult : results) {
+                    messages.add(toolResult.getAsJsonObject());
+                }
+                step();
+            });
+            return;
+        }
+
+        JsonObject toolCall = toolCalls.get(index).getAsJsonObject();
         String id = toolCall.has("id") ? toolCall.get("id").getAsString() : "";
-        JsonObject function = toolCall.getAsJsonObject("function");
+        JsonObject function = toolCall.has("function") && toolCall.get("function").isJsonObject()
+                ? toolCall.getAsJsonObject("function") : new JsonObject();
         String name = function.has("name") ? function.get("name").getAsString() : "";
 
-        JsonObject args = new JsonObject();
+        JsonObject args = null;
         if (function.has("arguments") && function.get("arguments").isJsonPrimitive()) {
-            String argsStr = function.get("arguments").getAsString();
             try {
-                args = JsonParser.parseString(argsStr).getAsJsonObject();
-            } catch (Exception e) {
-                // 参数 JSON 不完整（可能被 max-tokens 截断），让 AI 重新调用
-                JsonObject toolMessage = new JsonObject();
-                toolMessage.addProperty("role", "tool");
-                toolMessage.addProperty("tool_call_id", id);
-                toolMessage.addProperty("content", "{\"success\":false,\"error\":\"工具参数解析失败（可能被 max-tokens 截断），请重新调用 " + name + "\"}");
-                return toolMessage;
+                args = JsonParser.parseString(function.get("arguments").getAsString()).getAsJsonObject();
+            } catch (Exception ignored) {
+                // 参数 JSON 不完整（可能被 max-tokens 截断），下面让 AI 重新调用
             }
+        }
+        if (args == null) {
+            results.add(toolMessage(id, "{\"success\":false,\"error\":\"工具参数解析失败（可能被 max-tokens 截断），请重新调用 "
+                    + name + "\"}"));
+            executeToolCalls(toolCalls, index + 1, results);
+            return;
         }
 
         if (plugin.getConfig().getBoolean("display.show-tool-calls", true)) {
             info("AI 执行工具: " + name + " " + args);
         }
-        String result = plugin.getToolManager().execute(name, args, player.isOnline() ? player : null);
+        plugin.getToolManager().executeRouted(name, args, player.isOnline() ? player : null, result -> {
+            results.add(toolMessage(id, result));
+            executeToolCalls(toolCalls, index + 1, results);
+        });
+    }
 
+    private static JsonObject toolMessage(String id, String content) {
         JsonObject toolMessage = new JsonObject();
         toolMessage.addProperty("role", "tool");
         toolMessage.addProperty("tool_call_id", id);
-        toolMessage.addProperty("content", result);
+        toolMessage.addProperty("content", content);
         return toolMessage;
     }
 
@@ -251,7 +263,7 @@ public class BuildSession {
         info("已达到最大交互轮数 (" + maxIterations + ")。输入 /aibuild continue 让 AI 继续建造，或 /aibuild stop 停止任务。");
         int timeoutSeconds = plugin.getConfig().getInt("ai.continue-timeout-seconds", 300);
         if (timeoutSeconds > 0) {
-            continueTimeoutTask = Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            cancelContinueTask = SchedulerUtil.runGlobalLater(plugin, () -> {
                 if (!cancelled && awaitingContinue) {
                     awaitingContinue = false;
                     cancel();
@@ -262,9 +274,9 @@ public class BuildSession {
     }
 
     private void cancelContinueTimeout() {
-        if (continueTimeoutTask != null) {
-            continueTimeoutTask.cancel();
-            continueTimeoutTask = null;
+        if (cancelContinueTask != null) {
+            cancelContinueTask.run();
+            cancelContinueTask = null;
         }
     }
 

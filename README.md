@@ -11,17 +11,17 @@
 - **操作可撤销**：所有方块修改自动记录历史，AI 可通过 `undo` 工具自我纠错
 - **交互轮数保护**：达到最大轮数后暂停并询问玩家是否继续（`/aibuild continue`），防止无限循环
 - **配置热重载**：`/aibuild reload` 免重启生效
+- **Folia 支持**：适配 Folia 的区域多线程调度
 
 ## 环境要求
 
 - Java 17+
-- Paper / Spigot 1.18 及以上（按 1.18.2 API 编译，已在 Paper 1.18.2 与 1.21.11 验证）
-- NBT 读写通过内置的 [NBT-API](https://github.com/tr7zw/Item-NBT-API) 完成，不绑定 NMS 版本
-- 区域复制功能仍依赖 1.18.2 的 NMS，其他版本会自动降级为不可用并提示
+- Paper / Spigot 1.18 及以上，Folia 1.19.4 以上
+- 各版本的功能差异与限制见 [COMPATIBILITY.md](COMPATIBILITY.md)
 
 ## 安装
 
-1. 执行 `mvn clean package` 构建，得到 `target/AIBuilding-1.0.jar`
+1. 执行 `mvn clean package` 构建，得到 `target/AIBuilding-1.1.jar`
 2. 将 jar 放入服务器的 `plugins` 文件夹，启动服务器
 3. 编辑 `plugins/AIBuilding/config.yml`，填入你的 `api-key`，按需修改 `api-base` 与 `model`
 4. 执行 `/aibuild reload` 或重启服务器
