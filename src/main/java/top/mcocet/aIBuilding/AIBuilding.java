@@ -9,6 +9,7 @@ import top.mcocet.aIBuilding.ai.ToolManager;
 import top.mcocet.aIBuilding.command.AIBuildCommand;
 import top.mcocet.aIBuilding.util.ContextStore;
 import top.mcocet.aIBuilding.util.LogBuffer;
+import top.mcocet.aIBuilding.util.NbtUtil;
 
 import java.util.Map;
 import java.util.UUID;
@@ -30,6 +31,10 @@ public final class AIBuilding extends JavaPlugin {
         logBuffer = new LogBuffer(getConfig().getInt("safety.log-buffer-size", 500));
         // 挂到根日志器以捕获全部控制台输出
         Logger.getLogger("").addHandler(logBuffer);
+
+        if (!NbtUtil.init()) {
+            getLogger().warning("NBT-API 初始化失败，get_block_nbt / set_block_nbt 工具将不可用");
+        }
 
         openAIClient = new OpenAIClient(this);
         toolManager = new ToolManager(this);

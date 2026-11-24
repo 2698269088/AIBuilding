@@ -2,13 +2,21 @@ package top.mcocet.aIBuilding.ai;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import de.tr7zw.changeme.nbtapi.iface.ReadWriteNBT;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
+import org.bukkit.block.Container;
 import org.bukkit.block.data.BlockData;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.EntityType;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemStack;
 import top.mcocet.aIBuilding.AIBuilding;
 import top.mcocet.aIBuilding.util.BlockHistory;
 import top.mcocet.aIBuilding.util.NbtUtil;
@@ -20,6 +28,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.io.File;
 import java.nio.file.Files;
@@ -30,6 +39,8 @@ import java.nio.file.Path;
  * 所有工具均须在服务器主线程执行。
  */
 public class ToolManager {
+
+    private static final int MAX_SPAWN_COUNT = 32;
 
     private final AIBuilding plugin;
     private final JsonArray definitions;
@@ -85,6 +96,12 @@ public class ToolManager {
                     return inspectRegion(args, player);
                 case "set_environment":
                     return setEnvironment(args, player);
+                case "spawn_entity":
+                    return spawnEntity(args, player);
+                case "put_item_in_container":
+                    return putItemInContainer(args, player);
+                case "set_chunk_loaded":
+                    return setChunkLoaded(args, player);
                 case "get_player_position":
                     return getPlayerPosition(player);
                 case "undo":
@@ -211,7 +228,7 @@ public class ToolManager {
             return error("缺少必要参数 x/y/z");
         }
         if (!NbtUtil.isAvailable()) {
-            return error("当前服务端版本不支持 NBT 读取");
+            return error("NBT 支持未初始化成功（详见控制台日志）");
         }
         World world = resolveWorld(a, player);
         Block target = world.getBlockAt(x, y, z);
@@ -240,7 +257,7 @@ public class ToolManager {
             return error("缺少必要参数 x/y/z/nbt");
         }
         if (!NbtUtil.isAvailable()) {
-            return error("当前服务端版本不支持 NBT 修改");
+            return error("NBT 支持未初始化成功（详见控制台日志）");
         }
         World world = resolveWorld(a, player);
         Block target = world.getBlockAt(x, y, z);
@@ -958,6 +975,167 @@ public class ToolManager {
         return ok("已撤销上一次操作，剩余可撤销操作: " + history.size()).toString();
     }
 
+    private String spawnEntity(JsonObject a, Player player) {
+        Integer x = getInt(a, "x"), y = getInt(a, "y"), z = getInt(a, "z");
+        String entityName = getString(a, "entity");
+        if (x == null || y == null || z == null || entityName == null) {
+            return error("缺少必要参数 x/y/z/entity");
+        }
+        World world = resolveWorld(a, player);
+        if (!checkHeight(world, y)) {
+            return error("Y 坐标超出世界高度范围");
+        }
+        EntityType type = parseEntityType(entityName);
+        if (type == null || !type.isSpawnable() || type.getEntityClass() == null) {
+            return error("未知或不可生成的实体类型: " + entityName);
+        }
+        Integer countArg = getInt(a, "count");
+        int count = countArg == null ? 1 : countArg;
+        if (count < 1 || count > MAX_SPAWN_COUNT) {
+            return error("生成数量需在 1~" + MAX_SPAWN_COUNT + " 之间");
+        }
+        String name = getString(a, "name");
+        String snbt = getString(a, "nbt");
+        ReadWriteNBT parsedNbt = null;
+        if (snbt != null && !snbt.isEmpty()) {
+            if (!NbtUtil.isAvailable()) {
+                return error("NBT 支持未初始化成功（详见控制台日志）");
+            }
+            try {
+                parsedNbt = NbtUtil.parseSnbt(snbt);
+            } catch (Exception e) {
+                return error("NBT 解析失败: " + e.getMessage());
+            }
+        }
+
+        Location loc = new Location(world, x + 0.5, y, z + 0.5);
+        int spawned = 0;
+        for (int i = 0; i < count; i++) {
+            Entity entity = world.spawnEntity(loc, type);
+            if (entity == null) {
+                break;
+            }
+            if (name != null && entity instanceof LivingEntity) {
+                ((LivingEntity) entity).setCustomName(name);
+            }
+            if (parsedNbt != null) {
+                try {
+                    NbtUtil.setEntityNbt(entity, parsedNbt);
+                } catch (Exception e) {
+                    return error("实体已生成，但 NBT 写入失败: " + e.getMessage());
+                }
+            }
+            spawned++;
+        }
+        if (spawned == 0) {
+            return error("生成失败，该位置可能没有足够的空间或该实体无法在此生成");
+        }
+        JsonObject result = ok("已在 (" + x + ", " + y + ", " + z + ") 生成 " + spawned + " 个 " + type.name()
+                + (spawned < count ? "（其余 " + (count - spawned) + " 个因空间不足未能生成）" : ""));
+        result.addProperty("entity", type.name());
+        result.addProperty("spawned", spawned);
+        return result.toString();
+    }
+
+    private String putItemInContainer(JsonObject a, Player player) {
+        Integer x = getInt(a, "x"), y = getInt(a, "y"), z = getInt(a, "z");
+        String itemName = getString(a, "item");
+        if (x == null || y == null || z == null || itemName == null) {
+            return error("缺少必要参数 x/y/z/item");
+        }
+        World world = resolveWorld(a, player);
+        if (!checkHeight(world, y)) {
+            return error("Y 坐标超出世界高度范围");
+        }
+        Material material = parseMaterial(itemName);
+        if (material == null || !material.isItem()) {
+            return error("未知物品类型: " + itemName);
+        }
+        Integer amountArg = getInt(a, "amount");
+        int amount = amountArg == null ? 1 : amountArg;
+        if (amount < 1 || amount > material.getMaxStackSize()) {
+            return error("物品数量需在 1~" + material.getMaxStackSize() + " 之间");
+        }
+        Block block = world.getBlockAt(x, y, z);
+        BlockState state = block.getState();
+        if (!(state instanceof Container)) {
+            return error("(" + x + ", " + y + ", " + z + ") 不是容器方块（支持箱子/木桶/熔炉/漏斗/发射器等）");
+        }
+        Inventory inventory = ((Container) state).getInventory();
+
+        ItemStack stack = new ItemStack(material, amount);
+        String snbt = getString(a, "nbt");
+        if (snbt != null && !snbt.isEmpty()) {
+            if (!NbtUtil.isAvailable()) {
+                return error("NBT 支持未初始化成功（详见控制台日志）");
+            }
+            try {
+                NbtUtil.setItemNbt(stack, NbtUtil.parseSnbt(snbt));
+            } catch (Exception e) {
+                return error("物品 NBT 写入失败: " + e.getMessage());
+            }
+        }
+
+        Integer slotArg = getInt(a, "slot");
+        Boolean overwrite = getBoolean(a, "overwrite");
+        int slot;
+        if (slotArg != null) {
+            if (slotArg < 0 || slotArg >= inventory.getSize()) {
+                return error("槽位 " + slotArg + " 超出范围，该容器可用槽位为 0~" + (inventory.getSize() - 1));
+            }
+            ItemStack existing = inventory.getItem(slotArg);
+            if (existing != null && existing.getType() != Material.AIR
+                    && (overwrite == null || !overwrite)) {
+                return error("槽位 " + slotArg + " 已有 " + existing.getType().name() + " x" + existing.getAmount()
+                        + "，如确认覆盖请设置 overwrite=true");
+            }
+            slot = slotArg;
+        } else {
+            slot = inventory.firstEmpty();
+            if (slot < 0) {
+                return error("该容器没有空槽位，可用 slot 参数指定要覆盖的槽位");
+            }
+        }
+        inventory.setItem(slot, stack);
+
+        JsonObject result = ok("已向 (" + x + ", " + y + ", " + z + ") 的 " + block.getType().name()
+                + " 第 " + slot + " 号槽位放入 " + material.name() + " x" + amount);
+        result.addProperty("slot", slot);
+        result.addProperty("item", material.name());
+        result.addProperty("amount", amount);
+        return result.toString();
+    }
+
+    private String setChunkLoaded(JsonObject a, Player player) {
+        Integer cx = getInt(a, "chunk_x"), cz = getInt(a, "chunk_z");
+        Boolean loaded = getBoolean(a, "loaded");
+        if (cx == null || cz == null || loaded == null) {
+            return error("缺少必要参数 chunk_x/chunk_z/loaded");
+        }
+        World world = resolveWorld(a, player);
+        if (loaded) {
+            world.setChunkForceLoaded(cx, cz, true);
+            world.getChunkAt(cx, cz);
+            JsonObject result = ok("区块 (" + cx + ", " + cz + ") 已强制加载，不会被服务器自动卸载");
+            result.addProperty("world", world.getName());
+            result.addProperty("loaded", world.isChunkLoaded(cx, cz));
+            result.addProperty("force_loaded", world.isChunkForceLoaded(cx, cz));
+            return result.toString();
+        }
+        world.setChunkForceLoaded(cx, cz, false);
+        if (world.isChunkLoaded(cx, cz)) {
+            world.unloadChunk(cx, cz);
+        }
+        boolean stillLoaded = world.isChunkLoaded(cx, cz);
+        JsonObject result = ok(stillLoaded
+                ? "已取消强制加载；区块 (" + cx + ", " + cz + ") 仍处于加载状态（刚被使用或仍被占用），服务器会在无占用后自动卸载"
+                : "区块 (" + cx + ", " + cz + ") 已取消强制加载并卸载");
+        result.addProperty("world", world.getName());
+        result.addProperty("loaded", stillLoaded);
+        result.addProperty("force_loaded", world.isChunkForceLoaded(cx, cz));
+        return result.toString();
+    }
+
     // ==================== 辅助方法 ====================
 
     private void recordHistory(Player player, World world, List<BlockHistory.Snapshot> changes) {
@@ -1056,12 +1234,37 @@ public class ToolManager {
         return null;
     }
 
+    private static Boolean getBoolean(JsonObject obj, String key) {
+        if (obj.has(key) && obj.get(key).isJsonPrimitive()) {
+            return obj.get(key).getAsBoolean();
+        }
+        return null;
+    }
+
     private static Material parseMaterial(String name) {
         Material material = Material.matchMaterial(name);
         if (material == null) {
             material = Material.matchMaterial(name.toUpperCase());
         }
         return material;
+    }
+
+    private static EntityType parseEntityType(String name) {
+        String normalized = name.trim().toLowerCase(Locale.ROOT);
+        if (normalized.startsWith("minecraft:")) {
+            normalized = normalized.substring("minecraft:".length());
+        }
+        for (EntityType type : EntityType.values()) {
+            if (normalized.equals(type.getName())) {
+                return type;
+            }
+        }
+        String constant = normalized.toUpperCase(Locale.ROOT).replace(' ', '_').replace('-', '_');
+        try {
+            return EntityType.valueOf(constant);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
     }
 
     private static boolean checkHeight(World world, int y) {
@@ -1243,6 +1446,36 @@ public class ToolManager {
         tools.add(tool("set_environment", "设置世界的时间与天气", params(
                 prop("time", "integer", "可选，世界时间（0-24000，0 为清晨，6000 为正午）", false),
                 prop("weather", "string", "可选，天气: clear/rain/thunder", false),
+                prop("world", "string", "可选，世界名，默认使用玩家所在世界", false)
+        )));
+
+        tools.add(tool("spawn_entity", "在指定位置生成生物或实体（如 cow/pig/villager/zombie/armor_stand），可指定数量、名称与 NBT", params(
+                prop("entity", "string", "实体类型，如 cow、pig、villager、zombie、armor_stand、minecart", true),
+                prop("x", "integer", "生成位置 X 坐标", true),
+                prop("y", "integer", "生成位置 Y 坐标", true),
+                prop("z", "integer", "生成位置 Z 坐标", true),
+                prop("count", "integer", "可选，生成数量，默认 1，上限 32", false),
+                prop("name", "string", "可选，自定义名称（仅生物生效）", false),
+                prop("nbt", "string", "可选，附加到实体的 SNBT，如 {NoAI:1b,Silent:1b}", false),
+                prop("world", "string", "可选，世界名，默认使用玩家所在世界", false)
+        )));
+
+        tools.add(tool("put_item_in_container", "向指定位置的容器（箱子/木桶/熔炉/漏斗/发射器等）放入物品；该操作不进入 undo 历史", params(
+                prop("x", "integer", "容器方块 X 坐标", true),
+                prop("y", "integer", "容器方块 Y 坐标", true),
+                prop("z", "integer", "容器方块 Z 坐标", true),
+                prop("item", "string", "物品类型，如 diamond、oak_log、iron_sword", true),
+                prop("amount", "integer", "可选，数量，默认 1，不能超过该物品的堆叠上限", false),
+                prop("slot", "integer", "可选，从 0 开始的槽位号；不填则放入第一个空槽位", false),
+                prop("overwrite", "boolean", "可选，目标槽位已有物品时是否覆盖，默认 false", false),
+                prop("nbt", "string", "可选，物品 NBT（SNBT），如 {display:{Name:'{\"text\":\"剑\"}'}}", false),
+                prop("world", "string", "可选，世界名，默认使用玩家所在世界", false)
+        )));
+
+        tools.add(tool("set_chunk_loaded", "强制加载或卸载指定区块，用于让远处的建筑区域保持加载或释放内存", params(
+                prop("chunk_x", "integer", "区块 X 坐标（等于方块坐标 >> 4）", true),
+                prop("chunk_z", "integer", "区块 Z 坐标（等于方块坐标 >> 4）", true),
+                prop("loaded", "boolean", "true 强制加载并保持加载；false 取消强制加载并尝试卸载（仍被占用时会在空闲后自动卸载）", true),
                 prop("world", "string", "可选，世界名，默认使用玩家所在世界", false)
         )));
 
